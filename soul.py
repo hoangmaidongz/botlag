@@ -72,6 +72,13 @@ def main():
     bot.send_message(USER_ID, "🤖 **Bot đã khởi động!**")
     bot.polling()
 
+while True:
+    try:
+        bot.polling(none_stop=True, timeout=60)
+    except Exception as e:
+        print(f"Lỗi xảy ra: {e}")
+        time.sleep(5)
+
 if __name__ == "__main__":
     main()
     
